@@ -1,0 +1,225 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <string.h>
+#include <signal.h>
+//#include "myshell.h"
+ 
+#define BUFSIZ 1024	// max line buffer
+#define MAX_FILENAME 256// max string of the file name
+#define MAX_ARGS 64
+			// token sparators
+//extern char **environ;
+char cmdline[BUFSIZ];			// line buffer
+char * args[MAX_ARGS];				// pointers to arg strings
+char ** arg;					// working pointer thru args
+int argn;					// number of args
+char beginningPath[BUFSIZ];			// start path
+char path[BUFSIZ];				// current path
+char shellPath[BUFSIZ];			// shell path
+
+/* Variables regarding to i/o redirection */
+char choice[3][MAX_FILENAME]; 		// filename: index 0 => append, 1 => write, 2 => read
+//choice (0) = append file
+//choice (1) = write file
+//choice (2) =reac
+
+char boolchoice[3];// simple boolean to check what actions should be tacken 
+char *symbol[3] = { ">>", ">",  "<" };	// possible symbols to choose
+// > file: write the output into the file
+// >> file: append the output into the file
+// < file: read content from the file and send it to the program
+
+//Print error and exit 
+void error(char msg[BUFSIZ]) 
+{
+	printf("%s.\n", msg);
+	exit(1);
+}
+
+//Update current path 
+void updatePath() 
+{
+	getcwd(path, BUFSIZ-1);
+}
+
+/* Tokenize the line input */
+void tokenize() 
+{
+	/* Handle I/O redirection */
+	char *temp, *point;
+	int i;
+	for(i=0; i<3; i++) 
+	{		// 0: append(>>), 1: write(>), 2: read(<)
+		boolchoice[i] = 0;
+		
+		if((point = strstr(cmdline,symbol[i])) != NULL) 
+		{	// find the redirect symbol
+			temp = strtok(point+strlen(symbol[i]), " \t\n");// get the file name
+			strcpy(choice[i],temp);	// set input or output file name
+			boolchoice[i] = 1;// switches flag on
+			
+			*point = '\0';
+			if((temp=strtok(NULL," \t\n")) != NULL) 
+				strcat(cmdline,temp);					// restore the cmdline to get the command
+		}
+	}
+	
+	/* Tokenize the cmdline into args array */
+	argn = 1;
+	arg = args;
+	*arg++ = strtok(cmdline," \t\n");   	// tokenize the input
+	while ((*arg++ = strtok(NULL," \t\n")))	// last entry will be NULL
+		argn++;
+}
+
+/* Restore exit signal(ctrl+c) in child process */
+void sigChild() {
+	signal(SIGINT, SIG_IGN);
+	putchar('\n');
+}
+
+/* Handle i/o redirection */
+void ioRedirect(int readAllowed) 
+{
+	if(boolchoice[0] == 1)			// if flag index 0 on = '>>'
+		freopen(choice[0], "a", stdout);		// append stdout into the file 
+	if(boolchoice[1] == 1)			// if flag index 1 on = '>'
+		freopen(choice[1], "w", stdout);		// write stdout into the file
+	if(boolchoice[2] == 1 && readAllowed == 1) 	// if flag index 2 on = '<' and read allowed
+		freopen(choice[2], "r", stdin);		// read stdin from the file
+}
+
+/* Restore output redirection */
+void ioRedirectClose() 
+{
+	if(boolchoice[0] || boolchoice[1])		// if any flag is on
+		freopen("/dev/tty","w",stdout);			// restore output to the screen	
+}
+
+/* Execute commands */
+void execute() 
+{
+	if (args[0]) {		// if there is any command
+	
+		/* Repeat the user's input */
+		 if(!strcmp(args[0], "echo")) 
+		 {
+			ioRedirect(0);				// handle i/o redirection - read not allowed
+			
+			char *string = (char *)malloc(BUFSIZ);
+			strcpy(string, "");
+			arg = &args[1];
+			while(*arg) 
+			{				// join all arguments into a string 
+				strcat(string, *arg++);
+				strcat(string, " ");		// multiple spaces and tabs will be reduced to one space
+			}
+			
+			printf("%s\n", string);		// print the string
+			memset(string, 0, BUFSIZ);		// clear buffer
+			free(string);
+
+			ioRedirectClose();			// restore i/o redirection
+		}
+		
+		/* Exit the shell */
+		else if(!strcmp(args[0], "quit") || !strcmp(args[0], "exit")) 
+        {
+             exit(0);
+        }
+		
+		/** External commands **/
+		else {					// if there are no keyword matching, pass command onto OS 
+			int status;
+			pid_t pid;
+			signal(SIGINT, sigChild); 		// quit child process by signal SIGINT (ctrl + c)
+			
+			switch(pid = fork()) 
+			{
+				case -1:
+					error("fork error");
+					break;
+				case 0: 				// execution in child process
+					setenv("PARENT", shellPath, 1);
+					ioRedirect(1);				// handle i/o redirection - read allowed
+					
+					if(execvp(args[0],args) == -1)		// execute the command
+						error("command not found");
+					
+					exit(1); 				// can never reached here - exit with fault signal
+					break;
+			}
+			fflush(stdout);
+			waitpid(pid, &status, 0);		// wait until the child proccess finish
+		}
+	}
+}
+
+/* Read batch file and execute the command inside it */
+void readBatchFile(char filename[MAX_FILENAME]) 
+{
+	FILE *fp;
+	int lineNo = 1;
+	
+	fp = fopen(filename, "r");			// open the batch file
+	if(fp == NULL)
+		error("Batch file does not exists");
+	
+	while (fgets (cmdline, BUFSIZ, fp )) {	// read a line
+		printf("%d. %s", lineNo++, cmdline);		// print the command number
+		tokenize();					// tokenize the line
+		execute();					// run command
+		putchar('\n');
+	}
+
+	fclose(fp);					// close the file
+	exit(0);					// exit when at the end of the file
+}
+
+int main (int argc, char ** argv) 
+{
+	
+	while (!feof(stdin))
+	 { 				// keep reading input until "quit" command or eof of redirected input
+		updatePath();
+		printf("COP4338$");				// write prompt
+		
+		if (fgets (cmdline, BUFSIZ, stdin )) 
+		{		// read a line
+			
+			tokenize(); 					// tokenize input
+			
+			int run_in_background = 0;			// default: run in foreground
+			if(argn > 1 && !strcmp(args[argn - 1], "&")) 
+			{	// if & characters in the last argument: run in foreground
+				args[argn-1] = (char*)0;			// remove '&' from the inputLine
+				run_in_background = 1;
+			}
+			
+			/* Background execution handling */
+			if(run_in_background) 
+			{				// background execution
+				switch(fork()) 
+				{
+					case -1:
+						error("fork error");
+						break;
+					case 0: 				// execution in child process
+						setenv("PARENT", shellPath, 1);
+						execute();
+						exit(0);			// quit the child process
+						break;
+				}
+			} 
+			else 
+			{					// foreground execution
+				execute();
+			}
+		}
+	}
+	return 0; 
+}
